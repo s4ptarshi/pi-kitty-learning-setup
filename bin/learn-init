@@ -1,0 +1,293 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+TEMPLATE="$HOME/learning"
+TARGET="$(pwd)"
+START_SCRIPT="$TARGET/start-learn"
+
+# ------------------------------------------------------------
+# Paths
+# ------------------------------------------------------------
+
+TEMPLATE_VISUAL="$TEMPLATE/.pi/extensions/visual-tools"
+TEMPLATE_NODE_MODULES="$TEMPLATE_VISUAL/node_modules"
+
+TARGET_VISUAL="$TARGET/.pi/extensions/visual-tools"
+TARGET_NODE_MODULES="$TARGET_VISUAL/node_modules"
+
+# ------------------------------------------------------------
+# Checks
+# ------------------------------------------------------------
+
+if [[ ! -d "$TARGET/.git" ]]; then
+    echo "Error: run this from the root of a Git repository."
+    exit 1
+fi
+
+if [[ ! -d "$TEMPLATE/.pi" ]]; then
+    echo "Error: $TEMPLATE/.pi does not exist."
+    exit 1
+fi
+
+if [[ -e "$TARGET/.pi" ]]; then
+    echo "Error: $TARGET/.pi already exists."
+    echo "Refusing to overwrite it."
+    exit 1
+fi
+
+if [[ -e "$START_SCRIPT" ]]; then
+    echo "Error: $START_SCRIPT already exists."
+    echo "Refusing to overwrite it."
+    exit 1
+fi
+
+if [[ ! -d "$TEMPLATE_NODE_MODULES" ]]; then
+    echo "Error: visual-tools dependencies are not installed."
+    echo
+    echo "Run this once:"
+    echo
+    echo "  cd ~/learning/.pi/extensions/visual-tools"
+    echo "  npm install"
+    exit 1
+fi
+
+if ! command -v rsync >/dev/null 2>&1; then
+    echo "Error: rsync is not installed."
+    echo "Install with: sudo pacman -S rsync"
+    exit 1
+fi
+
+if ! command -v kitty >/dev/null 2>&1; then
+    echo "Error: kitty is not installed."
+    echo "The learning workflow runs pi directly inside Kitty (no tmux)."
+    exit 1
+fi
+
+KITTY_BACKEND="$HOME/.local/share/pi-kitty-backend/tmux.ts"
+if [[ ! -f "$KITTY_BACKEND" ]]; then
+    echo "Error: Kitty subagent backend not found at:"
+    echo "  $KITTY_BACKEND"
+    echo
+    echo "One-time setup: copy it there, e.g. from the GATSplat repo:"
+    echo "  mkdir -p ~/.local/share/pi-kitty-backend"
+    echo "  cp <repo>/scripts/pi-kitty-backend/tmux.ts $KITTY_BACKEND"
+    exit 1
+fi
+
+# Locate Conda binary dynamically (needed if lazy-loaded in Fish)
+CONDA_EXE=""
+if command -v conda >/dev/null 2>&1; then
+    CONDA_EXE="$(command -v conda)"
+else
+    for c_path in /data/miniconda3/bin/conda "$HOME/miniconda3/bin/conda" /netscratch/bhattach/miniconda3/bin/conda; do
+        if [[ -x "$c_path" ]]; then
+            CONDA_EXE="$c_path"
+            break
+        fi
+    done
+fi
+
+if [[ -z "$CONDA_EXE" ]]; then
+    echo "Error: conda executable was not found."
+    exit 1
+fi
+
+# Load Conda into current script execution space
+eval "$("$CONDA_EXE" shell.bash hook)"
+
+# Check for pi now that Conda paths are resolved
+if ! command -v pi >/dev/null 2>&1; then
+    echo "Error: pi is not installed or not in PATH."
+    exit 1
+fi
+
+# ------------------------------------------------------------
+# Copy .pi configuration
+# ------------------------------------------------------------
+
+echo "Copying learning environment..."
+
+mkdir -p "$TARGET/.pi"
+
+rsync -a \
+    --exclude='.git/' \
+    --exclude='git/' \
+    --exclude='node_modules/' \
+    "$TEMPLATE/.pi/" \
+    "$TARGET/.pi/"
+
+# ------------------------------------------------------------
+# Link visual-tools dependencies
+# ------------------------------------------------------------
+
+echo
+echo "Linking visual-tools dependencies..."
+
+ln -s "$TEMPLATE_NODE_MODULES" "$TARGET_NODE_MODULES"
+
+echo "  $TARGET_NODE_MODULES"
+echo "    -> $TEMPLATE_NODE_MODULES"
+
+# ------------------------------------------------------------
+# Install interactive subagents
+# ------------------------------------------------------------
+
+echo
+echo "Installing interactive subagents..."
+
+cd "$TARGET"
+
+if pi list 2>/dev/null | grep -q \
+    'git:github.com/amosblomqvist/pi-interactive-subagents'; then
+
+    echo "Interactive subagents already installed."
+
+else
+    pi install -l \
+        git:github.com/amosblomqvist/pi-interactive-subagents
+fi
+
+# ------------------------------------------------------------
+# Apply Kitty subagent backend
+# ------------------------------------------------------------
+
+echo
+echo "Applying Kitty subagent backend..."
+
+SUBAGENTS_TMUX_TS="$TARGET/.pi/git/github.com/amosblomqvist/pi-interactive-subagents/pi-extension/subagents/tmux.ts"
+cp "$KITTY_BACKEND" "$SUBAGENTS_TMUX_TS"
+
+echo "  $KITTY_BACKEND"
+echo "    -> $SUBAGENTS_TMUX_TS"
+
+# ------------------------------------------------------------
+# Gitignore
+# ------------------------------------------------------------
+
+echo
+echo "Updating .gitignore..."
+
+touch "$TARGET/.gitignore"
+
+if ! grep -Fxq ".pi/" "$TARGET/.gitignore"; then
+    printf '\n# Pi learning environment\n.pi/\n' >>"$TARGET/.gitignore"
+fi
+
+# ------------------------------------------------------------
+# Create start-learn
+# ------------------------------------------------------------
+
+echo "Creating start-learn..."
+
+cat >"$START_SCRIPT" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+
+if [[ $# -ne 1 ]]; then
+    echo "Usage: ./start-learn <conda-environment>"
+    echo
+    echo "Example:"
+    echo "  ./start-learn GATSplat"
+    exit 1
+fi
+
+CONDA_ENV="$1"
+PROJECT="$(pwd)"
+
+# ------------------------------------------------------------
+# Checks & Conda Discovery
+# ------------------------------------------------------------
+
+if [[ ! -d "$PROJECT/.git" ]]; then
+    echo "Error: run this from the root of a Git repository."
+    exit 1
+fi
+
+if [[ ! -d "$PROJECT/.pi" ]]; then
+    echo "Error: .pi does not exist."
+    echo "Run learn-init first."
+    exit 1
+fi
+
+if [[ -z "${KITTY_WINDOW_ID:-}" ]]; then
+    echo "Error: not running inside Kitty (KITTY_WINDOW_ID is unset)."
+    echo "pi-math and subagents require Kitty. Run this from a Kitty window."
+    exit 1
+fi
+
+# Locate Conda binary dynamically
+CONDA_EXE=""
+if command -v conda >/dev/null 2>&1; then
+    CONDA_EXE="$(command -v conda)"
+else
+    for c_path in /data/miniconda3/bin/conda "$HOME/miniconda3/bin/conda" /netscratch/bhattach/miniconda3/bin/conda; do
+        if [[ -x "$c_path" ]]; then
+            CONDA_EXE="$c_path"
+            break
+        fi
+    done
+fi
+
+if [[ -z "$CONDA_EXE" ]]; then
+    echo "Error: conda executable was not found."
+    exit 1
+fi
+
+# Load Conda into Bash
+eval "$("$CONDA_EXE" shell.bash hook)"
+
+if ! command -v pi >/dev/null 2>&1; then
+    echo "Error: pi was not found."
+    exit 1
+fi
+
+# ------------------------------------------------------------
+# Check environment
+# ------------------------------------------------------------
+
+if ! conda env list | awk '{print $1}' | grep -Fxq "$CONDA_ENV"; then
+    echo "Error: Conda environment '$CONDA_ENV' does not exist."
+    echo
+    echo "Available environments:"
+    conda env list
+    exit 1
+fi
+
+conda activate "$CONDA_ENV"
+
+echo
+echo "Project:   $PROJECT"
+echo "Conda:     $CONDA_ENV"
+echo "Python:    $(which python)"
+echo
+
+exec pi
+EOF
+
+chmod +x "$START_SCRIPT"
+
+# ------------------------------------------------------------
+# Done
+# ------------------------------------------------------------
+
+echo
+echo "=============================================="
+echo " Learning environment installed"
+echo "=============================================="
+echo
+echo "Created:"
+echo "  $TARGET/.pi/"
+echo "  $TARGET/start-learn"
+echo
+echo "Linked:"
+echo "  .pi/extensions/visual-tools/node_modules"
+echo
+echo "Installed:"
+echo "  pi-interactive-subagents (Kitty backend applied)"
+echo
+echo "Added to .gitignore:"
+echo "  .pi/"
+echo
+echo "Start with:"
+echo "  ./start-learn <conda-environment>"
+echo
